@@ -1243,3 +1243,34 @@ project rules or instruction files varies by runtime and is not guaranteed
 by `additionalDirectories`.
 
 [Evidence and verification limits](../../experiments/additional-directories-2026-10-11.md).
+
+## Structured output
+
+`SessionOptions.outputSchema` supplies native `--json-schema` as JSON. It
+applies to the process, including subsequent prompts, held queued inputs,
+steers within the current turn, and spontaneous turns. Pass it again when
+resuming. `launchArgs` remains unchecked: a conflicting `--json-schema`
+argument may override this setting.
+
+On a successful `result`, OAR carries `structured_output` unchanged on
+`turn_ended.outcome.structuredOutput`. This is Claude's own validated value;
+OAR adds no validation and never parses result text into it. A missing field
+stays absent, and an explicit `null` is retained. Failed and aborted outcomes
+do not carry it. `promptAndWait`, status and SessionView preserve the same
+outcome live and from saved records.
+
+**Completed does not guarantee a structured value, even with `outputSchema`.**
+When the model never calls `StructuredOutput`, or returns plain text after
+an invalid call, Claude can remind it once and then end with `result/success`,
+`is_error: false` and no `structured_output`. OAR preserves that completed
+outcome without the field. Hosts must check whether `structuredOutput` is
+present, not just whether `kind` is `completed`.
+
+With Claude 2.1.296 and a scripted provider, incorrect values exhausted native
+StructuredOutput retries and ended with `error_max_structured_output_retries`
+(`terminal_reason: structured_output_retry_exhausted`), mapped to
+`failed: unknown` with the native reason. A malformed schema instead made the
+process exit; it did not produce a validated value. This is not a promise
+that every invalid schema fails at open.
+
+[Native evidence and regressions](../../experiments/structured-output-2026-10-11.md).
