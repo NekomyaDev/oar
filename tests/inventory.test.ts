@@ -1,14 +1,14 @@
 import { afterEach, expect, test, vi } from "vitest";
 import { resolve } from "node:path";
 import { codexSkills, codexTools, codexMcpServers } from "../packages/oar/src/runtimes/codex/inventory.js";
-import { claudeSkills, claudeTools, claudeMcpServers } from "../packages/oar/src/runtimes/claude/inventory.js";
+import { claudeCommands, claudeSkills, claudeTools, claudeMcpServers } from "../packages/oar/src/runtimes/claude/inventory.js";
 import { grokSkills, grokMcpServers } from "../packages/oar/src/runtimes/grok/inventory.js";
 import { defaultRuntimes } from "../packages/oar/src/index.js";
 import { asRecord, parseJson } from "../packages/oar/src/shared/json.js";
 import { fakeLineProcess, type FakeLineProcess } from "./fixtures/fake-line-process.js";
 
 const spawnLineProcess = vi.hoisted(() => vi.fn<(
-  command: string, args: readonly string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv },
+  command: string, args: readonly string[], options?: { cwd?: string; env?: NodeJS.ProcessEnv; killTree?: boolean },
 ) => FakeLineProcess>());
 vi.mock("../packages/oar/src/shared/executable/index.js", () => ({ spawnLineProcess }));
 const executable = { kind: "available", via: "executable", command: "fake" } as const;
@@ -30,6 +30,14 @@ function control(serve: (method: string) => unknown): FakeLineProcess {
     self.emit(`${JSON.stringify({ type: "control_response", response: { request_id: "other", subtype: "success", response: {} } })  }\n`);
     self.emit(`${JSON.stringify({ type: "control_response", response: { request_id: request?.request_id, subtype: "success", response } })  }\n`);
   });
+}
+
+function observeSettlement<T>(reading: Promise<T>): { settled(): boolean; result: Promise<T> } {
+  let settled = false;
+  const result = (async () => {
+    try { return await reading; } finally { settled = true; }
+  })();
+  return { settled: () => settled, result };
 }
 
 test("Codex forwards resolved cwd and preserves disabled skills without creating a thread", async () => {
@@ -111,6 +119,65 @@ test("Claude skills are context entries, never initialize command aliases", asyn
   expect(fake.killed()).toBe(true);
 });
 
+test("Claude command discovery uses one private initialize answer, including aliases and hints", async () => {
+  const methods: string[] = [];
+  const fake = control((method) => {
+    methods.push(method);
+    return { commands: [
+      { name: "review", description: "Review", argumentHint: "<path>", aliases: ["audit"], builtin: true },
+      { name: "project-command", description: "Project", private: "secret command body" },
+    ], account: { email: "private@example.test" }, organization: "secret org" };
+  });
+  spawnLineProcess.mockReturnValue(fake);
+  const result = await claudeCommands(executable, { cwd: "project-command" });
+  expect(result).toMatchObject({ kind: "ok", view: "discovered", partial: false });
+  if (result.kind !== "ok") { throw new Error("expected native commands"); }
+  expect(result.items).toMatchInlineSnapshot(`
+    [
+      {
+        "aliases": [
+          "audit",
+        ],
+        "argumentHint": "<path>",
+        "description": "Review",
+        "name": "review",
+        "source": "builtin",
+      },
+      {
+        "description": "Project",
+        "name": "project-command",
+      },
+    ]
+  `);
+  expect({ methods, killTree: spawnLineProcess.mock.calls[0]?.[2]?.killTree }).toEqual({ methods: ["initialize"], killTree: true });
+  expect(JSON.stringify(result)).not.toMatch(/secret|private@example\.test/u);
+});
+
+test.each([{ commands: [] }, {}])("Claude inventory waits for process exit after answering or rejecting the query", async (payload) => {
+  vi.useFakeTimers();
+  const fake = control(() => payload);
+  const kill = vi.spyOn(fake, "kill").mockImplementation(() => {});
+  spawnLineProcess.mockReturnValue(fake);
+  const reading = observeSettlement(claudeCommands(executable));
+  await vi.advanceTimersByTimeAsync(0);
+  expect(kill).toHaveBeenCalledOnce();
+  expect(reading.settled()).toBe(false);
+  fake.end(null);
+  await expect(reading.result).resolves.toMatchObject({ kind: "commands" in payload ? "ok" : "unavailable" });
+});
+
+test.each([{}, { commands: {} }, { commands: [{ name: "x", aliases: [3] }] }])("Claude malformed command catalog is unavailable", async (payload) => {
+  const fake = control(() => payload);
+  spawnLineProcess.mockReturnValue(fake);
+  await expect(claudeCommands(executable)).resolves.toMatchObject({ kind: "unavailable", code: "query_failed" });
+  expect(fake.killed()).toBe(true);
+});
+
+test("Claude reports a native empty command catalog as a successful empty result", async () => {
+  spawnLineProcess.mockReturnValue(control(() => ({ commands: [] })));
+  await expect(claudeCommands(executable)).resolves.toMatchObject({ kind: "ok", items: [], partial: false });
+});
+
 test("Claude pending MCP waits for startup; failure remains partial and strips native error secrets", async () => {
   vi.useFakeTimers();
   let reads = 0;
@@ -147,7 +214,7 @@ test("Claude native unsupported is distinct from query failure", async () => {
   expect(fake.killed()).toBe(true);
 });
 
-test.each([codexSkills, claudeSkills, grokSkills])("timeout releases owned discovery process", async (read) => {
+test.each([codexSkills, claudeSkills, claudeCommands, grokSkills])("timeout releases owned discovery process", async (read) => {
   vi.useFakeTimers();
   const fake = fakeLineProcess();
   spawnLineProcess.mockReturnValue(fake);
@@ -155,6 +222,19 @@ test.each([codexSkills, claudeSkills, grokSkills])("timeout releases owned disco
   await vi.advanceTimersByTimeAsync(30);
   await expect(result).resolves.toMatchObject({ kind: "unavailable", code: "timeout" });
   expect(fake.killed()).toBe(true);
+});
+
+test.each([claudeCommands, grokSkills])("inventory timeout waits for teardown before returning", async (read) => {
+  vi.useFakeTimers();
+  const fake = fakeLineProcess();
+  const kill = vi.spyOn(fake, "kill").mockImplementation(() => {});
+  spawnLineProcess.mockReturnValue(fake);
+  const reading = observeSettlement(read(executable, { timeoutMs: 30 }));
+  await vi.advanceTimersByTimeAsync(30);
+  expect({ calls: kill.mock.calls.length, settled: reading.settled(), killTree: spawnLineProcess.mock.calls[0]?.[2]?.killTree })
+    .toEqual({ calls: 1, settled: false, killTree: true });
+  fake.end(null);
+  await expect(reading.result).resolves.toMatchObject({ kind: "unavailable", code: "timeout" });
 });
 
 test.each([claudeSkills, grokMcpServers])("malformed native list never becomes an empty success", async (read) => {
@@ -179,6 +259,7 @@ test("Grok independent discovery never authenticates or creates a session", asyn
     kind: "ok", view: "discovered", items: [{ id: "compat", name: "compat", source: "project" }],
   });
   expect(spawnLineProcess.mock.calls[0]?.[1]).toEqual(["inspect", "--json"]);
+  expect(spawnLineProcess.mock.calls[0]?.[2]?.killTree).toBe(true);
   expect(fake.written).toEqual([]);
 });
 
@@ -186,5 +267,10 @@ test("unavailable native surfaces return unsupported without starting a runtime"
   await expect(defaultRuntimes.require("kimi").skills(executable)).resolves.toMatchObject({ kind: "unsupported" });
   await expect(defaultRuntimes.require("grok").tools(executable)).resolves.toMatchObject({ kind: "unsupported" });
   await expect(defaultRuntimes.require("pi").mcpServers({ kind: "available", via: "bundled" })).resolves.toMatchObject({ kind: "unsupported" });
+  expect(spawnLineProcess).not.toHaveBeenCalled();
+});
+
+test.each(["codex", "grok", "kimi", "opencode", "antigravity"])("%s has no independent command query on its selected transport", async (id) => {
+  await expect(defaultRuntimes.require(id).commands(executable)).resolves.toMatchObject({ kind: "unsupported", code: "transport_unavailable" });
   expect(spawnLineProcess).not.toHaveBeenCalled();
 });
