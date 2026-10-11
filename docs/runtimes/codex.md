@@ -640,6 +640,11 @@ dangling request is the honest record
 ([stream tests](../../tests/codex/codex-session-stream.test.ts)); none arrived
 in any live run.
 
+On Windows without Codex's Windows sandbox enabled, `workspace-write`
+becomes `read-only` under the native
+[`effective_sandbox_mode` rule](https://github.com/openai/codex/blob/rust-v0.162.1/codex-rs/config/src/config_toml.rs#L821).
+Additional workspace directories do not change that selection.
+
 A `fileChange` item carries `changes: [{path, kind, diff}]`, the same on
 `item/started` and `item/completed`: `path` absolute, `kind` `{type: "add"}`,
 `{type: "delete"}`, or `{type: "update", move_path}`, where `move_path`
@@ -1376,3 +1381,25 @@ Evidence and verification limits: [tool-denial audit](../../experiments/disallow
 ## Launch arguments
 
 `SessionOptions.launchArgs` go after `app-server` and OAR's own `-c` overrides, before `--listen stdio://`; codex reads `-c key=value` there, for example `-c service_tier="fast"`. codex applies `-c` overrides in command-line order (`codex-rs/utils/cli/src/config_override.rs`), so a host `-c` for a key OAR also sets (`sandbox_mode`) is the one that applies. OAR passes them unchecked and never records them; give them again on resume. See [launch arguments](../spec/runtime-matrix.md#launch-arguments).
+
+## Additional directories
+
+`SessionOptions.additionalDirectories` maps to the native
+`runtimeWorkspaceRoots` field on `thread/start` and `thread/resume`.
+OAR resolves paths against cwd, prepends cwd and removes duplicates. A given
+non-empty list replaces native runtime roots, including configured roots;
+it does not merge an unknown saved directory list. Omission or an empty list
+sends no override and follows Codex's configuration/restore rules.
+
+OAR reads `runtimeWorkspaceRoots` from the open reply and rejects if any
+requested root is absent or unreported. Native 0.162.1 can ignore overrides
+for a thread already loaded in the same app-server; OAR resumes in a new
+process, where the override was verified. A new thread needs a completed
+turn before it has a rollout to resume. The `workspace-write`, `read-only`
+and `danger-full-access` sandbox modes all stayed unchanged across new and
+cold-resumed sessions on Linux. On Windows with its native sandbox disabled,
+Codex selects `readOnly` for `workspace-write`, independently of extra roots
+and on both new and resumed sessions; OAR does not override this fallback. Extra roots extend the native workspace; they do not
+turn a read-only sandbox into a writable one.
+
+[Evidence and verification limits](../../experiments/additional-directories-2026-10-11.md).
