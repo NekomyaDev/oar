@@ -8,10 +8,10 @@ import { asRecord, type JsonRecord } from "../../shared/json.js";
 import { withSessionCredentials } from "../../shared/session-credentials.js";
 import { newSessionLinks } from "../../shared/session-links.js";
 import { startAppServerClient, type RpcOutcome } from "./app-server-client.js";
-import { CODEX_SETTINGS_REPORT_MS, codexOpenReadback, codexResumeEffortRefusal, codexThreadOpen } from "./open.js";
+import { CODEX_SETTINGS_REPORT_MS, codexOpenReadback, codexResumeEffortRefusal, codexThreadName, codexThreadOpen } from "./open.js";
 import { foldCodexNotification, initialCodexProjection, type CodexProjectionState } from "./projection.js";
 import { prepareCodexToolDenials } from "./tool-denials.js";
-import { openThread, rpcControl, type RpcControlPlan } from "./rpc-control.js";
+import { nameThread, openThread, rpcControl, type RpcControlPlan } from "./rpc-control.js";
 
 /*
  * App-server v2: RPC replies answer controls; notifications carry facts.
@@ -181,6 +181,8 @@ export const codexSession: StartSession = withSessionCredentials(async (installa
       throw new Error(refusal);
     }
   }
+  // Last, so an open refused above leaves the user's thread unrenamed.
+  await nameThread(client, threadId, codexThreadName(openMethod, options, started));
 
   /** Turn a plan builder into a Session control member. */
   const via = <Args extends unknown[]>(plan: (...args: Args) => RpcControlPlan) =>

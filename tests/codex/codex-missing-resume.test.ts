@@ -1,6 +1,6 @@
 import { inspect } from "node:util";
 import { afterEach, expect, test, vi } from "vitest";
-import { SessionNotFoundError } from "../../packages/oar/src/index.js";
+import { SessionNotFoundError, SessionUnavailableError } from "../../packages/oar/src/index.js";
 import { codexSession } from "../../packages/oar/src/runtimes/codex/session.js";
 import { asRecord } from "../../packages/oar/src/shared/json.js";
 import { fakeLineProcess, type FakeLineProcess } from "../fixtures/fake-line-process.js";
@@ -31,8 +31,29 @@ test("Codex's recorded missing rollout failure is typed, retaining native cause 
   expect(fake.killed()).toBe(true);
 });
 
+// [env] codex 0.162.0 (experiments/codex-session-name.ts): the same -32600, in other words.
 test.each([
-  { ...errors.codex, message: "thread existing already has an active writer" },
+  { native: { ...errors.codex, message: "thread existing already has an active writer" }, reason: "in_use" },
+  { native: { ...errors.codex, message: "session existing is archived. Run `codex unarchive existing` to unarchive it first." }, reason: "archived" },
+])("Codex's $reason refusal is a SessionUnavailableError with the native cause", async ({ native, reason }) => {
+  const fake = fault(native);
+  const failure: unknown = await codexSession(installation, { cwd: process.cwd(), resume: "existing" }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(SessionUnavailableError);
+  expect(failure).not.toBeInstanceOf(SessionNotFoundError);
+  expect(failure).toMatchObject({ name: "SessionUnavailableError", sessionId: "existing", reason, message: `codex thread/resume failed: ${native.message}`, cause: { method: "thread/resume", native } });
+  expect(fake.killed()).toBe(true);
+});
+
+test("an unavailable target's id is redacted like a missing one's", async () => {
+  const secret = "00000000-0000-4000-8000-000000000294";
+  fault({ ...errors.codex, message: `thread ${secret} already has an active writer` });
+  const failure: unknown = await codexSession(installation, { cwd: process.cwd(), resume: secret, env: { API_KEY: secret } }).catch((error: unknown) => error);
+  expect(failure).toBeInstanceOf(SessionUnavailableError);
+  expect(failure).toMatchObject({ sessionId: "[redacted]", reason: "in_use", cause: { native: { message: "thread [redacted] already has an active writer" } } });
+  expect(inspect(failure, { depth: null })).not.toContain(secret);
+});
+
+test.each([
   { ...errors.codex, message: "cannot resume an unloaded multi-agent v2 sub-agent through its parent; resume the sub-agent directly" },
   { ...errors.codex, message: "other error: no rollout found for thread id missing" },
   { ...errors.codex, code: -32_603 },
@@ -41,6 +62,7 @@ test.each([
   const failure: unknown = await codexSession(installation, { cwd: process.cwd(), resume: "existing" }).catch((error: unknown) => error);
   expect(failure).toBeInstanceOf(Error);
   expect(failure).not.toBeInstanceOf(SessionNotFoundError);
+  expect(failure).not.toBeInstanceOf(SessionUnavailableError);
   expect(failure).toMatchObject({ cause: { method: "thread/resume", native } });
   expect(fake.killed()).toBe(true);
 });

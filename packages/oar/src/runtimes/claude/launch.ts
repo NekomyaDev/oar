@@ -6,6 +6,7 @@ import { claudeSessionEnv } from "./environment.js";
 import type { SessionOptions } from "../../contracts/session.js";
 import { spawnLineProcess, type LineProcess } from "../../shared/executable/index.js";
 import { givenMcpServers } from "../../shared/mcp-servers.js";
+import { checkSessionName } from "../../shared/session-options.js";
 import { handOverMcpConfig, sweepAbandonedMcpConfigs } from "./mcp-config.js";
 
 /*
@@ -35,6 +36,11 @@ function spawnClaude(command: string, sessionId: string, options: SessionOptions
     // safety. Isolation is the sandbox's job, not the approval flow's.
     "--dangerously-skip-permissions",
     ...(options.resume === undefined ? ["--session-id", sessionId] : ["--resume", sessionId]),
+    // SessionOptions.name (#368) names a new session only: `--name` on a
+    // resume replaces the name the session has, which may be the user's
+    // ([env] claude 2.1.292: it reports the old one as session_title_changed
+    // at startup, and a new `--name` overwrites it).
+    ...(options.resume !== undefined || options.name === undefined ? [] : ["--name", options.name]),
     ...(options.model === undefined ? [] : ["--model", options.model]),
     ...(options.effort === undefined ? [] : ["--effort", options.effort]),
     ...tierArgs,
@@ -68,6 +74,7 @@ function spawnClaude(command: string, sessionId: string, options: SessionOptions
  */
 export async function launchClaude(command: string, sessionId: string, options: SessionOptions): Promise<ClaudeProcess> {
   refuseManagedLaunchArgs(options.launchArgs);
+  checkSessionName(options);
   const tierArgs = claudeServiceTierArgs(options.serviceTier);
   const servers = givenMcpServers(options.mcpServers);
   // Either way, what dead hosts left behind goes first (mcp-config.ts).
