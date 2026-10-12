@@ -33,11 +33,11 @@ calls, resume semantics, and what each adapter still does not carry.
 | pi-durable | native child conversations exist, outside the selected watch | no inferred edges | own model/tool ledgers since attachment | no child graph projected | numeric conversation id in host storage | [native/current mapping](../runtimes/pi-durable.md) |
 | pi | no native (host composes) | host-nested sessions | flat (host splits) | no runtime-reported edges | session id | [src] |
 | cursor (`@cursor/sdk`) | wrapper records (#2) in the parent run's updates | the `task` call id on `tool-call-delta` | each run's `turn-ended` usage is the root's; none seen for a child ([env]) | `agentPath` (not in graph) | `agentId` | [native/current mapping](../runtimes/cursor.md) |
-| grok (ACP) | nested sessions (#3), same connection | child has its own ACP sessionId | child usage lands in the child session's records ([src]; live unverified), added by the parent's `withChildren` | parent→child session edges (in graph, [sym]) | ACP `sessionId` | [native/current mapping](../runtimes/grok.md) |
+| grok (ACP) | nested sessions (#3), same connection | child has its own ACP sessionId | child ledgers stay native-only: the root's prompt ledger already includes a foreground child's spend, and `withChildren` is absent ([grok](../runtimes/grok.md#context-usage-billing-and-compaction)) | parent→child session edges (in graph, [sym]) | ACP `sessionId` | [native/current mapping](../runtimes/grok.md) |
 | antigravity (ACP) | opaque (#1): child activity flattened onto the parent session | `start_subagent` tool card only; child id only as a `toolCallId` prefix | no usage reported for any session ([env]) | nothing fabricated | ACP `sessionId` | [native/current mapping](../runtimes/antigravity.md) |
 | kimi (ACP) | opaque (#1): default subscribes main agent only | root `Agent` tool card only | no typed child usage exposed | nothing fabricated from display text | ACP `sessionId` | [native/current mapping](../runtimes/kimi.md) |
 | opencode v1 (ACP) | opaque (#1): child sessions not forwarded | root `task` tool card only | no child usage exposed | nothing fabricated | ACP `sessionId` (opencode `ses_` id) | [native/current mapping](../runtimes/opencode.md) |
-| opencode v2 (ACP) | child updates forwarded on the parent envelope | native child `id` / `parentID` metadata | child usage stays on the child record; not in the root's total, added by its `withChildren` | native parent/child session edges | native ACP session id | [v2 mapping](../runtimes/opencode.md#opencode-v2) |
+| opencode v2 (ACP) | child updates forwarded on the parent envelope | native child `id` / `parentID` metadata | children report context only, so there is no token total and no `withChildren` | native parent/child session edges | native ACP session id | [v2 mapping](../runtimes/opencode.md#opencode-v2) |
 | kimi-cli (native wire) | wrapper records (#2): `SubagentEvent`, one stream | `parent_tool_call_id` + `agent_id` + `subagent_type` | child events self-attribute | `agentPath`, recursive (not in graph) | session / agent_id | [src] |
 | kimi-code (native KAP) | agent graph (#2): key = `(session_id, agent_id)` | `subagentId` + `parentAgentId` + `parentToolCallId` + `runInBackground` | `subagent.completed` carries usage | `agentPath` (not in graph) | session / agent_id | [src] |
 
@@ -167,6 +167,28 @@ entrypoint wins so the host can deliberately choose it. Child-process and native
 Bash regressions: [session-env.test.ts](../../tests/session-env.test.ts),
 [pi-env.test.ts](../../tests/providers/pi-env.test.ts).
 
+## Custom model endpoints
+
+How to point each runtime at another model endpoint (a gateway, a self-hosted
+model, a mock), through the runtime's own configuration. OAR adds no endpoint
+option; these are the recipes the behavior backends use against a scripted
+provider ([`sea-trial/harness/aimock.ts`](../../sea-trial/harness/aimock.ts),
+[`aimock-acp.ts`](../../sea-trial/harness/aimock-acp.ts)), so each is exercised
+in CI. Keys belong in `SessionOptions.env` or the runtime's own config, never in
+`launchArgs` (visible in `ps`).
+
+| Runtime | Where | What |
+| --- | --- | --- |
+| claude | `SessionOptions.env` | `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` (Anthropic Messages API) |
+| codex | `$CODEX_HOME/config.toml`, home set with `SessionOptions.env: { CODEX_HOME }` | `model_provider = "<id>"` and `[model_providers.<id>]` with `base_url`, `env_key` (the variable holding the key) and `wire_api = "responses"` |
+| opencode | `$XDG_CONFIG_HOME/opencode/opencode.json` | a `provider.<id>` with its AI SDK `npm` package and `options.baseURL` / `apiKey`, chosen as `model` |
+| kimi | `SessionOptions.env` | `KIMI_MODEL_NAME`, `KIMI_MODEL_BASE_URL`, `KIMI_MODEL_API_KEY`, `KIMI_MODEL_PROVIDER_TYPE = "openai"` (chat completions) |
+| grok | `$GROK_HOME/config.toml` | `[models] default = "<id>"` and `[model.<id>]` with `base_url`, `api_key`, `api_backend = "chat_completions"` |
+| antigravity | `$GEMINI_HOME` and `SessionOptions.env` | `antigravity-acp/settings.json` with `auth.type = "gemini-api-key"`, then `GEMINI_API_KEY` and `GOOGLE_GEMINI_BASE_URL` |
+| pi | `models.json` in pi's agent dir (`OAR_PI_AGENT_DIR`) | a `providers.<id>` with `baseUrl`, `apiKey`, `api` and its models; process-wide, since pi runs in-process |
+| pi-durable | the host's own `Harness` | `models.setProvider(createProvider({ baseUrl, ... }))` |
+| cursor | none | Cursor's SDK talks to Cursor's own backend only |
+
 ## Disallowed tools
 
 `SessionOptions.disallowedTools` is a readonly list of native names, sent to
@@ -221,8 +243,9 @@ again on resume.
 
 Claude requests partial output for new and resumed sessions: text/thinking
 deltas project immediately with the native API message ID; completed blocks
-do not repeat them. Tool-argument chunks remain raw activity until the full
-call arrives. See [Claude observation](../runtimes/claude.md#observation-children-and-history).
+do not repeat them. Tool-argument chunks stream as `tool_call_input_delta`
+(the running phase's `writing`), then `tool_call_input` carries the complete
+input. See [Claude observation](../runtimes/claude.md#observation-children-and-history).
 
 ## Structured output
 
