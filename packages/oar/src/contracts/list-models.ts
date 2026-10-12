@@ -21,6 +21,20 @@ export interface ModelEntry {
   readonly defaultServiceTier?: string;
   /** Present when the runtime lists the model but refuses to run it as-is. */
   readonly disabled?: { readonly reason: string };
+  /**
+   * The model a session uses when no `model` is set, where the runtime says
+   * so: codex's configured model (else its catalog `isDefault`), a new ACP
+   * session's current model (grok, kimi, antigravity), pi's saved default.
+   * Configuration is read for the host's own cwd. Absent when the runtime
+   * cannot say (claude: its settings can pick a model its list does not
+   * reflect; cursor, opencode); OAR never picks one.
+   */
+  readonly default?: true;
+  /**
+   * The provider serving this model, for runtimes with several (pi, opencode),
+   * so a host can group or label entries without parsing `id`.
+   */
+  readonly provider?: { readonly id: string; readonly displayName?: string };
 }
 
 /**
