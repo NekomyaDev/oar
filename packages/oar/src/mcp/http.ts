@@ -37,6 +37,57 @@ export async function body(request: IncomingMessage): Promise<string | null> {
   return size > MAX_BODY_BYTES ? null : Buffer.concat(chunks).toString("utf8");
 }
 
+/** A GET asking for the SSE stream (streamable HTTP: `Accept` names text/event-stream). */
+export function acceptsEventStream(request: IncomingMessage): boolean {
+  return (request.headers.accept ?? "").includes("text/event-stream");
+}
+
+/** How often an open stream gets a comment, so a client's idle timeout never closes it (pi's undici: 300 s). */
+const KEEP_ALIVE_MS = 15_000;
+
+/** The open server-to-client SSE streams: one per client GET, held until the client goes away. */
+export class EventStreams {
+  readonly #open = new Set<ServerResponse>();
+  #keepAlive: ReturnType<typeof setInterval> | undefined;
+
+  open(response: ServerResponse, session: string | undefined): void {
+    response.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive", ...(session === undefined ? {} : { "mcp-session-id": session }) });
+    response.flushHeaders();
+    this.#open.add(response);
+    this.#keepAlive ??= setInterval(() => { this.#write(": keep-alive\n\n"); }, KEEP_ALIVE_MS).unref();
+    // A client gone mid-write is a closed stream, not a host crash.
+    response.on("error", () => { this.#forget(response); });
+    response.once("close", () => { this.#forget(response); });
+  }
+
+  /** One JSON-RPC message to every open stream. */
+  message(message: JsonRecord): void {
+    this.#write(`event: message\ndata: ${JSON.stringify(message)}\n\n`);
+  }
+
+  /** End every stream at once: nothing is written to them afterwards, even before their close events. */
+  endAll(): void {
+    for (const stream of this.#open) {
+      this.#forget(stream);
+      stream.end();
+    }
+  }
+
+  #write(chunk: string): void {
+    for (const stream of this.#open) {
+      if (!stream.writableEnded) { stream.write(chunk); }
+    }
+  }
+
+  #forget(stream: ServerResponse): void {
+    this.#open.delete(stream);
+    if (this.#open.size === 0 && this.#keepAlive !== undefined) {
+      clearInterval(this.#keepAlive);
+      this.#keepAlive = undefined;
+    }
+  }
+}
+
 export function rpcError(response: ServerResponse, code: number, message: string): void {
   response.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ jsonrpc: "2.0", id: null, error: { code, message } }));
 }

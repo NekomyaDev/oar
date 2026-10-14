@@ -1,5 +1,7 @@
 /* oxlint-disable max-statements -- Each test follows one client conversation with the server end to end. */
 import { once } from "node:events";
+import { get, type IncomingMessage } from "node:http";
+import { setTimeout as delay } from "node:timers/promises";
 import { afterEach, expect, test } from "vitest";
 import { serveMcpTools, type HostTool, type ServedMcpTools } from "../packages/oar/src/index.js";
 
@@ -45,12 +47,14 @@ test("the entry is an http server on 127.0.0.1 behind a bearer token", async () 
   expect(entry.server.headers?.Authorization).toMatch(/^Bearer [\w-]{40,}$/u);
   expect(await statusOf(post(entry, { jsonrpc: "2.0", id: 1, method: "ping" }, {}))).toBe(401);
   expect(await statusOf(post(entry, { jsonrpc: "2.0", id: 1, method: "ping" }, { Authorization: "Bearer wrong" }))).toBe(401);
+  // A GET is the SSE stream only when it asks for one (streamable HTTP).
   expect(await statusOf(fetch(entry.server.url, { headers: entry.server.headers ?? {} }))).toBe(405);
+  expect(await statusOf(fetch(entry.server.url, { headers: { accept: "text/event-stream" } }))).toBe(401);
 });
 
 test("initialize, tools/list and tools/call speak MCP", async () => {
   const entry = await serve([echo, { name: "bare", inputSchema: { type: "object" }, handler: () => ({ content: [{ type: "text", text: "no" }], isError: true }) }]);
-  expect(await rpc(entry, "initialize", { protocolVersion: "2025-03-26" })).toMatchObject({ result: { protocolVersion: "2025-03-26", capabilities: { tools: {} }, serverInfo: { name: "host" } } });
+  expect(await rpc(entry, "initialize", { protocolVersion: "2025-03-26" })).toMatchObject({ result: { protocolVersion: "2025-03-26", capabilities: { tools: { listChanged: true } }, serverInfo: { name: "host" } } });
   expect(await rpc(entry, "tools/list")).toEqual({ jsonrpc: "2.0", id: 1, result: { tools: [
     { name: "echo", description: "Echo text", inputSchema: echo.inputSchema },
     { name: "bare", inputSchema: { type: "object" } },
@@ -124,6 +128,81 @@ test("bad JSON is a 400, and names runtimes cannot take are refused up front", a
   }
   await expect(serveMcpTools({ name: "host", tools: [{ ...echo, name: "a.b" }] })).rejects.toThrow("tool name");
   await expect(serveMcpTools({ name: "host", tools: [echo, echo] })).rejects.toThrow("be unique");
+});
+
+/** The SSE stream a client opens with GET; `next()` is the next chunk of text, "" once the stream ends. */
+async function openStream(entry: ServedMcpTools): Promise<{ readonly status: number; readonly contentType: string | undefined; next(): Promise<string>; close(): void }> {
+  const { promise, resolve, reject } = Promise.withResolvers<IncomingMessage>();
+  const request = get(entry.server.url, { headers: { ...entry.server.headers, accept: "text/event-stream" } }, resolve);
+  request.once("error", reject);
+  const response = await promise;
+  const chunks: string[] = [];
+  response.on("data", (chunk: Buffer) => { chunks.push(chunk.toString("utf8")); });
+  return {
+    status: response.statusCode ?? 0,
+    contentType: response.headers["content-type"],
+    async next() {
+      if (chunks.length === 0 && !response.destroyed && !response.readableEnded) {
+        await Promise.race([once(response, "data"), once(response, "close")]);
+      }
+      return chunks.shift() ?? "";
+    },
+    close() { request.destroy(); },
+  };
+}
+
+// #399: a host changes the served set while sessions run; every open stream hears of it.
+test("setTools replaces the served set and sends tools/list_changed on every open stream", async () => {
+  const entry = await serve([echo]);
+  const first = await openStream(entry);
+  const second = await openStream(entry);
+  expect(first.status).toBe(200);
+  expect(first.contentType).toBe("text/event-stream");
+  const pong: HostTool = { name: "pong", inputSchema: { type: "object" }, handler: () => "pong" };
+  const heard = Promise.all([first.next(), second.next()]);
+  entry.setTools([pong]);
+  for (const text of await heard) {
+    expect(text).toBe(`event: message\ndata: ${JSON.stringify({ jsonrpc: "2.0", method: "notifications/tools/list_changed" })}\n\n`);
+  }
+  expect(await rpc(entry, "tools/list")).toEqual({ jsonrpc: "2.0", id: 1, result: { tools: [{ name: "pong", inputSchema: { type: "object" } }] } });
+  expect(await rpc(entry, "tools/call", { name: "echo", arguments: { text: "hi" } })).toMatchObject({ error: { code: -32_602, message: "unknown tool: echo" } });
+  expect(await rpc(entry, "tools/call", { name: "pong", arguments: {} })).toMatchObject({ result: { content: [{ type: "text", text: "pong" }] } });
+  expect(() => { entry.setTools([pong, pong]); }).toThrow("be unique");
+  first.close();
+  second.close();
+});
+
+test("a call already running finishes with the tool it started with", async () => {
+  const gate = Promise.withResolvers<void>();
+  const slow: HostTool = { name: "slow", inputSchema: { type: "object" }, handler: async () => { await gate.promise; return "old handler"; } };
+  const entry = await serve([slow]);
+  const running = rpc(entry, "tools/call", { name: "slow", arguments: {} });
+  await delay(50);
+  entry.setTools([{ ...slow, handler: () => "new handler" }]);
+  gate.resolve();
+  expect(await running).toMatchObject({ result: { content: [{ type: "text", text: "old handler" }] } });
+  expect(await rpc(entry, "tools/call", { name: "slow", arguments: {} })).toMatchObject({ result: { content: [{ type: "text", text: "new handler" }] } });
+});
+
+// Review of #400: a write between close() and the streams' close events crashed the host.
+test("setTools while close() runs, or after it, writes nothing and throws nothing", async () => {
+  const entry = await serveMcpTools({ name: "host", tools: [echo] });
+  const stream = await openStream(entry);
+  const closing = entry.close();
+  entry.setTools([echo]);
+  await Promise.resolve();
+  entry.setTools([echo]);
+  await closing;
+  entry.setTools([echo]);
+  expect(await stream.next()).toBe("");
+});
+
+test("close() ends the open streams", async () => {
+  const entry = await serveMcpTools({ name: "host", tools: [echo] });
+  const stream = await openStream(entry);
+  const ended = stream.next();
+  await entry.close();
+  expect(await ended).toBe("");
 });
 
 /** A tool whose calls wait for their signal, reporting each call's signal as it starts. */

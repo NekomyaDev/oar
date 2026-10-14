@@ -3,7 +3,7 @@ import { createServer, type IncomingMessage, type ServerResponse } from "node:ht
 import type { McpServer } from "../contracts/session-options.js";
 import { asRecord, parseJson, type JsonRecord } from "../shared/json.js";
 import { RESERVED_MCP_SERVER_NAMES } from "../shared/mcp-servers.js";
-import { authorized, body, listen, localOrigin, messagesOf, rpcError } from "./http.js";
+import { acceptsEventStream, authorized, body, EventStreams, listen, localOrigin, messagesOf, rpcError } from "./http.js";
 
 /*
  * Tools the host implements, served to any runtime that takes
@@ -14,9 +14,11 @@ import { authorized, body, listen, localOrigin, messagesOf, rpcError } from "./h
  *
  * The protocol subset is the one every runtime's MCP client was shown to use
  * with tests/fixtures/echo-mcp-server.mjs: streamable HTTP POSTs answered with
- * JSON (no SSE stream: GET is 405), notifications answered 202. Each
- * `initialize` opens its own MCP session, so several sessions can share one
- * served set without their request ids meeting.
+ * JSON, notifications answered 202. Each `initialize` opens its own MCP
+ * session, so several sessions can share one served set without their request
+ * ids meeting. A client's GET opens the one server-to-client channel, an SSE
+ * stream that carries only `notifications/tools/list_changed` (#399) and a
+ * keep-alive comment.
  */
 
 /** Content a host tool returns, in MCP's own shapes. */
@@ -57,6 +59,15 @@ export interface ServeMcpToolsOptions {
 export interface ServedMcpTools {
   /** The `SessionOptions.mcpServers` entry: http on 127.0.0.1 with the bearer token in `headers`. */
   readonly server: Extract<McpServer, { readonly type: "http" }>;
+  /**
+   * Replace the served tools, under the same name rules, and send
+   * `notifications/tools/list_changed` on every open stream. Calls already
+   * running finish with the tool they started with; a call to a tool no
+   * longer served is an unknown tool. Whether a running session's model sees
+   * the new set is the runtime's choice (#399,
+   * docs/spec/runtime-matrix.md#host-served-tools).
+   */
+  setTools(tools: readonly HostTool[]): void;
   /** Stops serving and aborts calls still running. */
   close(): Promise<void>;
 }
@@ -65,12 +76,15 @@ const SERVER_NAME = /^[\w-]+$/u;
 const TOOL_NAME = /^[\w-]{1,64}$/u;
 type CallId = string | number;
 
-function checkTools(options: ServeMcpToolsOptions): ReadonlyMap<string, HostTool> {
-  if (!SERVER_NAME.test(options.name) || RESERVED_MCP_SERVER_NAMES.has(options.name)) {
-    throw new Error(`serveMcpTools name ${JSON.stringify(options.name)} must match ${String(SERVER_NAME)} and not be one of ${JSON.stringify([...RESERVED_MCP_SERVER_NAMES])}`);
+function checkName(name: string): void {
+  if (!SERVER_NAME.test(name) || RESERVED_MCP_SERVER_NAMES.has(name)) {
+    throw new Error(`serveMcpTools name ${JSON.stringify(name)} must match ${String(SERVER_NAME)} and not be one of ${JSON.stringify([...RESERVED_MCP_SERVER_NAMES])}`);
   }
+}
+
+function checkTools(given: readonly HostTool[]): ReadonlyMap<string, HostTool> {
   const tools = new Map<string, HostTool>();
-  for (const tool of options.tools) {
+  for (const tool of given) {
     if (!TOOL_NAME.test(tool.name) || tools.has(tool.name)) {
       throw new Error(`serveMcpTools tool name ${JSON.stringify(tool.name)} must match ${String(TOOL_NAME)} and be unique`);
     }
@@ -104,14 +118,21 @@ interface Origin {
 class ToolServer {
   readonly #name: string;
   readonly #instructions: string | undefined;
-  readonly #tools: ReadonlyMap<string, HostTool>;
+  #tools: ReadonlyMap<string, HostTool>;
   /** Running calls by MCP session and request id: clients number requests alike, so an id alone is not one call. */
   readonly #calls = new Map<string, AbortController>();
+  /** Open server-to-client SSE streams (a client's GET). */
+  readonly streams = new EventStreams();
 
   constructor(options: ServeMcpToolsOptions, tools: ReadonlyMap<string, HostTool>) {
     this.#name = options.name;
     this.#instructions = options.instructions;
     this.#tools = tools;
+  }
+
+  setTools(tools: ReadonlyMap<string, HostTool>): void {
+    this.#tools = tools;
+    this.streams.message({ jsonrpc: "2.0", method: "notifications/tools/list_changed" });
   }
 
   /** The JSON-RPC answer to one message, or null for a notification or a client's response. */
@@ -132,6 +153,7 @@ class ToolServer {
 
   abortAll(): void {
     for (const controller of this.#calls.values()) { controller.abort(); }
+    this.streams.endAll();
   }
 
   async #result(id: CallId, method: string, params: JsonRecord, origin: Origin): Promise<JsonRecord> {
@@ -139,7 +161,7 @@ class ToolServer {
       case "initialize":
         return { result: {
           protocolVersion: typeof params.protocolVersion === "string" && PROTOCOL_VERSIONS.includes(params.protocolVersion) ? params.protocolVersion : PROTOCOL_VERSIONS[0],
-          capabilities: { tools: {} },
+          capabilities: { tools: { listChanged: true } },
           serverInfo: { name: this.#name, version: "1.0.0" },
           ...(this.#instructions === undefined ? {} : { instructions: this.#instructions }),
         } };
@@ -228,18 +250,27 @@ async function serve(tools: ToolServer, request: IncomingMessage, response: Serv
  * pi-durable, antigravity): see docs/spec/runtime-matrix.md#host-served-tools.
  */
 export async function serveMcpTools(options: ServeMcpToolsOptions): Promise<ServedMcpTools> {
-  const tools = new ToolServer(options, checkTools(options));
+  checkName(options.name);
+  const tools = new ToolServer(options, checkTools(options.tools));
   const token = randomBytes(32).toString("base64url");
   const expected = Buffer.from(`Bearer ${token}`);
   const server = createServer((request, response) => {
     if (!localOrigin(request)) { response.writeHead(403).end(); return; }
     if (!authorized(request, expected)) { response.writeHead(401).end(); return; }
-    if (request.method !== "POST") { response.writeHead(405, { allow: "POST" }).end(); return; }
+    if (request.method === "GET" && acceptsEventStream(request)) {
+      const session = request.headers["mcp-session-id"];
+      tools.streams.open(response, typeof session === "string" ? session : undefined);
+      return;
+    }
+    if (request.method !== "POST") { response.writeHead(405, { allow: "GET, POST" }).end(); return; }
     void serve(tools, request, response);
   });
   const port = await listen(server);
   return {
     server: { name: options.name, type: "http", url: `http://127.0.0.1:${String(port)}/mcp`, headers: { Authorization: `Bearer ${token}` } },
+    setTools(next) {
+      tools.setTools(checkTools(next));
+    },
     async close() {
       tools.abortAll();
       const { promise, resolve } = Promise.withResolvers<void>();
