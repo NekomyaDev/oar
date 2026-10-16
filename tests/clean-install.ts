@@ -59,7 +59,7 @@ function cursorPeerVersion(): string {
  */
 const PROBE = `
 import { createCursorRuntime, defaultRuntimes } from "@botiverse/oar";
-for (const entry of ["browser", "observe", "kernel", "brands", "testing", "agents", "agents/report"]) {
+for (const entry of ["browser", "forms", "observe", "kernel", "brands", "testing", "agents", "agents/report"]) {
   await import("@botiverse/oar/" + entry);
 }
 const kinds = {};
@@ -111,9 +111,40 @@ assert.equal(toolGroupSummary([], "running"), "Thinking…");
 assert.ok(loaded.every((file) => !file.startsWith("dist/runtimes/")), "Pure entries loaded a runtime adapter");
 `;
 
+/**
+ * The forms entry alone, from the packed package, in a fresh process: it loads
+ * only its own dist/forms files (no builtin, no other package, no runtime
+ * adapter), writes no global, leaves nothing running, and its exports work.
+ */
+const FORMS_PROBE = `
+import assert from "node:assert/strict";
+import { registerHooks } from "node:module";
+const loaded = [];
+registerHooks({
+  load(url, context, nextLoad) {
+    loaded.push(url);
+    return nextLoad(url, context);
+  },
+});
+const before = new Set(Object.getOwnPropertyNames(globalThis));
+const resources = process.getActiveResourcesInfo().length;
+const forms = await import("@botiverse/oar/forms");
+const marker = "/node_modules/@botiverse/oar/";
+const outside = loaded.filter((url) => !url.includes(marker + "dist/forms/"));
+assert.deepEqual(outside, [], "forms loaded something outside dist/forms: " + outside.join(", "));
+const grok = forms.configForms.grok;
+const listing = forms.toModelListing({ kind: "ok", models: [{ id: "grok-4", effortLevels: ["high"] }] });
+assert.deepEqual(forms.validateConfig(grok, { model: { kind: "preset", id: "grok-4" }, reasoningEffort: "high" }, { mode: "create", models: listing }), []);
+assert.deepEqual(forms.toSessionOptions(grok, { model: { kind: "preset", id: "grok-4" }, reasoningEffort: "high" }),
+  { ok: true, options: { model: "grok-4", effort: "high" }, unmapped: {}, secrets: {} });
+assert.deepEqual(Object.getOwnPropertyNames(globalThis).filter((name) => !before.has(name)), [], "forms wrote a global");
+assert.equal(process.getActiveResourcesInfo().length, resources, "forms left something running");
+`;
+
 const ENTRIES = `
 import * as oar from "@botiverse/oar";
 import * as browser from "@botiverse/oar/browser";
+import * as forms from "@botiverse/oar/forms";
 import * as agents from "@botiverse/oar/agents";
 import * as report from "@botiverse/oar/agents/report";
 import type { SubagentReport } from "@botiverse/oar/agents/report";
@@ -122,7 +153,7 @@ import * as kernel from "@botiverse/oar/kernel";
 import * as observe from "@botiverse/oar/observe";
 import * as testing from "@botiverse/oar/testing";
 
-export const entries = [oar, browser, agents, report, brands, kernel, observe, testing];
+export const entries = [oar, browser, forms, agents, report, brands, kernel, observe, testing];
 export const forward = (r: SubagentReport) => ({ text: report.formatReport(r), origin: report.reportOrigin(r), parsed: report.parseReport(report.formatReport(r)) });
 export const display = [observe.noticeText, observe.noticeTone, observe.phaseLabel, observe.failureText, observe.taskStatusLabel];
 `;
@@ -182,6 +213,7 @@ const browser = await build({
 assert.deepEqual(Object.values(browser.metafile.outputs).flatMap((output) => output.imports), []);
 
 run(process.execPath, ["--input-type=module", "-e", REPORT_PROBE], host);
+run(process.execPath, ["--input-type=module", "-e", FORMS_PROBE], host);
 assert.equal(readdirSync(path.join(host, "node_modules")).includes("@cursor"), false, "@cursor/sdk was installed without being asked for");
 assert.equal(readdirSync(path.join(host, "node_modules/@earendil-works")).includes("pi-durable"), false, "pi-durable was installed without being asked for");
 const bare = probe();
