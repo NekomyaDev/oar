@@ -53,13 +53,18 @@ function checkModel(field: ModelField, check: FieldCheck): IssueCode {
   return entry === undefined ? "model_not_listed" : "model_disabled";
 }
 
-/** The listing entry a model value runs as: the named preset, or the entry marked default for `inherit`. */
+/**
+ * The listing entry a model value runs as: the named preset, or the entry
+ * marked default for `inherit` and for an empty (optional) model, which
+ * launches exactly like `inherit`.
+ */
 function runningEntry(value: FormValue | undefined, models: readonly ModelEntry[]): ModelEntry | undefined {
   const model = asModelValue(value);
   if (model?.kind === "preset") {
     return models.find((candidate) => candidate.id === model.id);
   }
-  return model?.kind === "inherit" ? models.find((candidate) => candidate.default === true) : undefined;
+  const runsAsDefault = model?.kind === "inherit" || isEmpty(value);
+  return runsAsDefault ? models.find((candidate) => candidate.default === true) : undefined;
 }
 
 function checkEffort(field: EffortField, check: FieldCheck): IssueCode {
@@ -77,8 +82,11 @@ function checkEffort(field: EffortField, check: FieldCheck): IssueCode {
   // An unchanged stored effort on an unchanged model is kept, whatever the listing
   // now says: the entry a model runs as (the runtime's default above all) can move.
   const { stored } = check;
-  const preserved = stored !== undefined && stored[field.id] === check.value
-    && sameModel(stored[field.modelField], check.values[field.modelField]);
+  const storedModel = stored?.[field.modelField];
+  const model = check.values[field.modelField];
+  // Both left empty is an unchanged model too (an empty model runs as the default).
+  const modelUnchanged = sameModel(storedModel, model) || (isEmpty(storedModel) && isEmpty(model));
+  const preserved = stored !== undefined && stored[field.id] === check.value && modelUnchanged;
   return preserved ? null : "effort_not_offered";
 }
 
