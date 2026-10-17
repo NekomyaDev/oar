@@ -224,3 +224,43 @@ test("every form and baseline offers only model modes its launch accepts (modes 
     }
   }
 });
+
+const withEffort: RuntimeConfigForm = {
+  protocol: 1, runtime: "test", fields: [
+    { id: "model", kind: "model", modes: ["inherit", "preset", "custom"], required: true, label: { key: "k", en: "Model" } },
+    { id: "effort", kind: "effort", modelField: "model", required: false, label: { key: "k", en: "Effort" } },
+  ],
+};
+const withDefault: ModelListing = toModelListing({ kind: "ok", models: [
+  { id: "main", effortLevels: ["low", "high"], default: true },
+  { id: "retired", effortLevels: ["low"], disabled: { reason: "retired" } },
+] });
+
+test("effort under the runtime's default model is checked against the listing's default entry", () => {
+  expect(codes(withEffort, { model: { kind: "inherit" }, effort: "high" }, { mode: "create", models: withDefault })).toEqual([]);
+  expect(codes(withEffort, { model: { kind: "inherit" }, effort: "ultra" }, { mode: "create", models: withDefault })).toEqual(["effort:effort_not_offered"]);
+  // No entry marked default: the default model offers no effort; an unchanged stored one is kept.
+  expect(codes(withEffort, { model: { kind: "inherit" }, effort: "high" }, { mode: "create", models: live })).toEqual(["effort:effort_not_offered"]);
+  const stored: FormValues = { model: { kind: "inherit" }, effort: "high" };
+  expect(codes(withEffort, stored, { mode: "edit", stored, models: live })).toEqual([]);
+});
+
+test("a disabled model cannot be newly chosen; an unchanged stored one is kept", () => {
+  expect(codes(withEffort, { model: { kind: "preset", id: "retired" } }, { mode: "create", models: withDefault })).toEqual(["model:model_disabled"]);
+  const stored: FormValues = { model: { kind: "preset", id: "retired" }, effort: "low" };
+  expect(codes(withEffort, stored, { mode: "edit", stored, models: withDefault })).toEqual([]);
+  expect(codes(withEffort, { model: { kind: "preset", id: "retired" } }, { mode: "edit", stored: { model: { kind: "preset", id: "main" } }, models: withDefault }))
+    .toEqual(["model:model_disabled"]);
+});
+
+test("an unchanged stored effort is kept even when the entry its model runs as no longer lists it", () => {
+  // The runtime's default model is not the user's choice and moves between sessions.
+  const moved: ModelListing = toModelListing({ kind: "ok", models: [{ id: "next", effortLevels: ["low"], default: true }] });
+  const stored: FormValues = { model: { kind: "inherit" }, effort: "high" };
+  expect(codes(withEffort, stored, { mode: "edit", stored, models: moved })).toEqual([]);
+  const preset: FormValues = { model: { kind: "preset", id: "next" }, effort: "high" };
+  expect(codes(withEffort, preset, { mode: "edit", stored: preset, models: moved })).toEqual([]);
+  // A changed effort, or the same effort under a changed model, is checked as new.
+  expect(codes(withEffort, { ...stored, effort: "medium" }, { mode: "edit", stored, models: moved })).toEqual(["effort:effort_not_offered"]);
+  expect(codes(withEffort, { model: { kind: "preset", id: "next" }, effort: "high" }, { mode: "edit", stored, models: moved })).toEqual(["effort:effort_not_offered"]);
+});
