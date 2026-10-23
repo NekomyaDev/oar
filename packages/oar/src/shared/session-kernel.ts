@@ -1,4 +1,4 @@
-import { emptyInputRefusal } from "./control-input.js";
+import { carriesRefusal, emptyInputRefusal } from "./control-input.js";
 import { withSessionRecord } from "../observe/graph.js";
 import type {
   ControlResult,
@@ -111,6 +111,21 @@ function deliver(observer: RawEventObserver, record: RawEvent): void {
 export function createSessionKernel(sessionId: string = globalThis.crypto.randomUUID(), redact?: <T extends RawEvent>(record: T) => T): SessionKernel {
   const observers = new Set<RawEventObserver>();
   const log: RawEvent[] = [];
+  const notifications: RawEvent[] = [];
+  let publishing = false;
+  const publish = (record: RawEvent): void => {
+    notifications.push(record);
+    if (publishing) { return; }
+    publishing = true;
+    try {
+      for (const next of notifications) {
+        for (const observer of observers) { deliver(observer, next); }
+      }
+    } finally {
+      notifications.length = 0;
+      publishing = false;
+    }
+  };
   const nodeIds = new Set([sessionId]);
   let graph: SessionGraph = { nodes: [{ id: sessionId }], edges: [] };
   let seq = 0;
@@ -142,9 +157,9 @@ export function createSessionKernel(sessionId: string = globalThis.crypto.random
     if (record.kind === "request" && record.direction === "toRuntime" && record.body.kind === "dispose") {
       disposing = true;
     }
-    for (const observer of observers) {
-      deliver(observer, retained);
-    }
+    // A synchronous observer may withdraw before an adapter drains. Its new
+    // records are retained immediately, but every observer sees seq order.
+    publish(retained);
     return retained;
   };
 
@@ -165,26 +180,32 @@ export function createSessionKernel(sessionId: string = globalThis.crypto.random
     request,
     respond,
     async control(body, decide, at) {
-      const blocked = unreachable();
+      const blocked = unreachable() ?? carriesRefusal(body, log, at?.sessionId ?? sessionId, at?.agentPath ?? []);
       const issued = request("toRuntime", body, at);
       const decided = blocked ?? emptyInputRefusal(body) ?? await settle(decide, { ...issued, body });
       return { request: issued, response: respond(issued.id, decided, at) };
     },
     unreachable,
     rawEvents(observer, cursor) {
+      let afterSeq = cursor?.afterSeq ?? seq - 1;
+      const receive = (record: RawEvent): void => {
+        if (record.seq <= afterSeq) { return; }
+        afterSeq = record.seq;
+        deliver(observer, record);
+      };
       if (cursor !== undefined) {
         if (cursor.sessionId !== sessionId) {
           throw new Error(`cursor belongs to session ${cursor.sessionId}, not ${sessionId}`);
         }
         for (const record of log) {
           if (record.seq > cursor.afterSeq) {
-            deliver(observer, record);
+            receive(record);
           }
         }
       }
-      observers.add(observer);
+      observers.add(receive);
       return () => {
-        observers.delete(observer);
+        observers.delete(receive);
       };
     },
     records: () => log,

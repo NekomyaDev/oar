@@ -83,12 +83,22 @@ function removeInput(draft: Draft, index: number): void {
   }
 }
 
+/** Keep the aggregate for identity matching, but show its known constituents. */
+function hiddenAggregate(input: ConversationInput, conversation: ConversationState): boolean {
+  const request = input.attempts.at(-1)?.request;
+  const carried = input.carries?.filter((id) => id !== input.inputId) ?? [];
+  return carried.length > 0 && request !== undefined
+    && carried.every((inputId) => conversation.inputs.get(JSON.stringify([request.sessionId, request.agentPath, inputId]))?.attempts
+      .some((attempt) => attempt.request === request) === true);
+}
+
 /** Queue evidence arms attribution; only an actual conflicting turn defers a placed input. */
 export function foldInputUpdate(draft: Draft, input: ConversationInput, conversation: ConversationState): void {
-  if (input.state === "dropped") {
-    const request = input.attempts.at(-1)?.request;
-    if (request?.body.kind === "prompt") { removeEmptyTurn(draft, request.id); }
+  const request = input.attempts.at(-1)?.request;
+  if (hiddenAggregate(input, conversation)) {
+    return; // The original inputs enter together; do not repeat the aggregate body.
   }
+  if (input.state === "dropped" && request?.body.kind === "prompt") { removeEmptyTurn(draft, request.id); }
   const wait = awaitsEcho(input, conversation);
   upsertInput(draft, input, input.turn?.state === "queued" ? wait && draft.pendingInputs.some((pending) => pending.id === input.id) : wait);
 }
@@ -97,6 +107,7 @@ export function foldInputUpdate(draft: Draft, input: ConversationInput, conversa
 export function deferWaitingInputs(draft: Draft, event: Event, conversation: ConversationState): void {
   if (event.kind !== "turn_active" || event.sessionId !== draft.rootSessionId || event.agentPath.length > 0) { return; }
   for (const input of conversation.inputs.values()) {
+    if (hiddenAggregate(input, conversation)) { continue; }
     const request = input.attempts.at(-1)?.request;
     if (input.turn?.state !== "queued" || input.inputId === event.inputId
       || request?.sessionId !== event.sessionId || request.agentPath.length > 0) { continue; }
