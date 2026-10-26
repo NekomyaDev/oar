@@ -7,6 +7,7 @@ import { piAgentDir } from "./resolve.js";
 import { checkPiProjectPackages, reportMissingPiPackages } from "./project.js";
 import type { PiProjectOptions } from "./options.js";
 import { initPiTheme } from "./theme.js";
+import { piEnvBashTool } from "./open.js";
 
 interface PiReaders {
   readonly skills: () => InventoryResult<SkillEntry>;
@@ -69,6 +70,7 @@ function reader<T>(select: (readers: PiReaders) => () => InventoryResult<T>, pro
       const services = await sdk.createAgentSessionServices({ cwd: scope.cwd, agentDir, settingsManager });
       const { session } = await sdk.createAgentSessionFromServices({
         services, sessionManager: sdk.SessionManager.inMemory(scope.cwd),
+        ...(options.env === undefined ? {} : { customTools: [await piEnvBashTool(scope.cwd, options.env)] }),
       });
       try {
         return select(piInventories(session, scope))();

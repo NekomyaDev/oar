@@ -19,11 +19,53 @@ const facts = await orient(defaultRuntimes, {
 const choices = usability(facts, { minVersions: { codex: "0.164.0" } });
 ```
 
-Authentication methods accept an explicit `env`, but `orient` and the other
-readers do not yet accept an environment override. Their snapshot describes
-the host environment, which can differ from a login or session using another
-`HOME`, credential directory or proxy. Do not use this snapshot to confirm
-that overridden environment; call `authStatus(installation, { env })` directly.
+## Environment
+
+`OrientOptions.env` observes the environment a session can use. For each
+runtime, `orient` checks its `refusedSessionOptions.env` declaration. When
+present, `orient` omits the overlay from that runtime's readers and observes
+the host environment; it does not mark the runtime unsupported. Otherwise it
+passes the overlay to every reader selected by depth and includes: installation,
+auth status, providers, usage, models and inventories. This decision uses the
+declaration, never the runtime name.
+
+It uses the same overlay as `SessionOptions.env`: a string overrides an
+inherited value and `null` removes it. Omission or `{}` keeps existing behavior.
+The host's `process.env` is never mutated and shell profiles are never loaded
+implicitly. To use a login shell, call
+[`userShellEnvironment()`](login.md#explicit-login-shell-environment) explicitly
+and pass its `env` to discovery, authentication, readers and sessions alike.
+
+The individual readers accept `env` too: `installation({ env })`,
+`authStatus(installation, { env })`, `accountUsage(installation, { env })`,
+`listModels(installation, { env })`, the inventory methods and
+`providers(installation, { env, resolve })`. Installation resolves binary
+pins, PATH/PATHEXT, shadowed copies and home-based fallbacks from that environment
+on each call, and uses it for readiness and version commands. An empty PATH
+never searches the working directory for a bare command; explicit paths and
+supported installation fallbacks remain usable.
+
+CLI readers pass that environment to their native processes. Cursor and Pi
+Durable direct readers reject nonempty overlays with
+`UnsupportedOptionError("env")`, matching their session refusals. `orient`
+therefore calls those readers without an overlay and preserves their host facts.
+
+Pi readers accept the overlay with its in-process session meaning: the
+inventory session's Bash tool receives it, while SDK configuration, credential
+resolution and SDK-owned key commands use the host environment. Bundled
+installation discovery is independent of the overlay. These readers remain in
+the host process even when Pi sessions use `execution: "subprocess"`; no separate
+query protocol or host-environment mutation is introduced.
+
+Kimi usage supports credential and CLI environment changes but rejects actual
+changes to a fixed list of host HTTP/TLS variables
+([list and rationale](account-usage.md#environment)). Its sessions accept env,
+so `orient` passes the overlay and preserves that reader's precise refusal.
+
+`orient` maps `UnsupportedOptionError("env")` to `{ kind: "unsupported" }`,
+not `failed`, without exposing exception text or environment values. Other
+read failures keep their existing classification. Direct calls retain the
+typed exception so the caller can inspect the unsupported option.
 
 ## Depth and effects
 
@@ -77,7 +119,7 @@ including its own `source` and timestamp where that reader supplies them.
 | `failed` | The reader threw. The generic `reason` avoids exposing arbitrary credential-bearing exception text. Other probes continue. |
 | `timed_out` | The probe, runtime or overall budget expired, with its observation time. |
 | `skipped` | An existing reader was not called because of `not_installed`, `logged_out` or `depth`. |
-| `unsupported` | No reader exists, or the native reader cannot provide that observation. |
+| `unsupported` | No reader exists, or the reader cannot provide that observation in the requested environment. |
 
 A missing installation skips dependent existing readers. A failed or timed-out
 installation propagates that failure to its dependent probes. Explicit native

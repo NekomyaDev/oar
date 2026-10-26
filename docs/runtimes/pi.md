@@ -1159,3 +1159,16 @@ provider reader instead uses credential-list metadata and the SDK's static
 subscription metadata. It does not resolve keys or refresh expired entries.
 A present stored entry is reported as configured, not validated; environment-
 only credentials do not appear in that stored list.
+
+## Reader environment
+
+Installation, model listing, provider listing and supported inventories accept
+`env`. They use the in-process session meaning: the inventory's replacement
+Bash tool receives the overlay through its spawn hook; SDK configuration,
+credential resolution and SDK-owned key commands keep the host environment.
+Installation probes the bundled SDK and is independent of the overlay. OAR
+never changes `process.env`.
+
+These readers still run in the host process with `execution: "subprocess"`;
+that option moves sessions, not readers, to a child. There is no separate
+subprocess query protocol. See [reader environments](../spec/orientation.md#environment).
