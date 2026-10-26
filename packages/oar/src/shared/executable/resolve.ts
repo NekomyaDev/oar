@@ -1,8 +1,16 @@
 import which from "which";
 
 /** Resolve one executable through PATH (and PATHEXT on Windows) without spawning anything. */
-export function resolveExecutable(executable: string): string | null {
-  return which.sync(executable, { nothrow: true });
+export function resolveExecutable(executable: string, env: Readonly<NodeJS.ProcessEnv> = process.env): string | null {
+  const key = (name: string): string | undefined => process.platform === "win32"
+    ? Object.keys(env).toSorted().find((entry) => entry.toUpperCase() === name)
+    : name;
+  const path = env[key("PATH") ?? "PATH"] ?? (process.platform === "win32" ? "" : "/usr/bin:/bin");
+  const pathExt = env[key("PATHEXT") ?? "PATHEXT"] ?? ".EXE;.CMD;.BAT;.COM";
+  // An explicitly empty search path must not discover a command in cwd.
+  if (path === "" && !executable.includes("/") && !executable.includes("\\")) { return null; }
+  // A pinned path still uses which for executable and PATHEXT checks.
+  return which.sync(executable, { nothrow: true, path: path === "" ? "." : path, pathExt: pathExt === "" ? ";" : pathExt });
 }
 
 /**
