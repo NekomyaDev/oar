@@ -12,7 +12,7 @@ function text(value: unknown): string | undefined {
 }
 
 /**
- * `Cursor.auth.status()` (SDK 1.0.35) reads the stored login
+ * `Cursor.auth.status()` (SDK 1.0.40) reads the stored login
  * (`~/.cursor/sdk/auth.json`) and answers `{ status: "logged-out" }`, also
  * for a key past its expiry, or `{ status: "logged-in", backendUrl, email?,
  * apiKeyExpiresAtMs? }`; it never returns the key. `CURSOR_API_KEY` is not
@@ -30,6 +30,9 @@ export function projectCursorAuthStatus(status: unknown): AuthStatus {
   const expiresMs = asNumber(record.apiKeyExpiresAtMs);
   const expiresAt = expiresMs === null ? null : utcInstantFromDate(new Date(expiresMs));
   const account: LoginAccount = {
+    // This status describes the SDK's stored Cursor user key, not a
+    // provider API key. The native account's Cursor plan funds its usage.
+    credential: "api_key", metering: "plan",
     ...(email === undefined ? {} : { email }),
     ...(expiresAt === null ? {} : { expiresAt }),
   };
@@ -55,9 +58,12 @@ export async function readCursorAuthStatus(auth: CursorAuth, timeoutMs = STATUS_
 
 /** Read only: asks the SDK's `Cursor.auth.status`, never a login flow, and returns no key. */
 export function cursorAuthStatusWith(load: () => Promise<CursorSdk>): AuthStatusReader {
-  return async (installation, options = {}) => {
+  const reader: AuthStatusReader = async (installation, options = {}) => {
     if (installation.via !== "bundled") {
       return { kind: "unknown", detail: "cursor's sign-in status needs the bundled @cursor/sdk" };
+    }
+    if (process.env.CURSOR_API_KEY !== undefined) {
+      return { kind: "unknown", detail: "Sessions use CURSOR_API_KEY from the environment; Cursor.auth.status neither reads nor validates that key.", source: STATUS_SOURCE };
     }
     const sdk = await loadedSdk(load);
     if ("failed" in sdk) {
@@ -70,4 +76,6 @@ export function cursorAuthStatusWith(load: () => Promise<CursorSdk>): AuthStatus
     const status = await readCursorAuthStatus(auth, options.timeoutMs);
     return status;
   };
+  // With no status options, the official SDK uses only its local file store.
+  return Object.assign(reader, { localOnly: true as const });
 }
