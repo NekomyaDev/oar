@@ -5,6 +5,8 @@ import { piInstallation } from "./installation.js";
 import { type piListModels, piModelLister } from "./list-models.js";
 import { piRefusedSessionOptions } from "./open.js";
 import { createPiSession } from "./session.js";
+import { onFirstCall } from "../../shared/lazy.js";
+import { piRpcRefusedSessionOptions } from "./rpc/open.js";
 
 import type { PiRuntimeOptions } from "./options.js";
 
@@ -16,15 +18,19 @@ export type { PiRuntimeOptions } from "./options.js";
  * subscription usage surface to observe.
  */
 export function createPiRuntime(options: PiRuntimeOptions = {}): Runtime & { readonly installation: typeof piInstallation; readonly listModels: typeof piListModels } {
+  const subprocess = options.execution === "subprocess";
+  // oxlint-disable-next-line typescript/no-unnecessary-condition -- JavaScript hosts can bypass the discriminated option type.
+  if (!subprocess && options.command !== undefined) { throw new Error("A Pi command requires execution: subprocess"); }
+  if (options.args !== undefined && options.command === undefined) { throw new Error("Pi command arguments require command"); }
   return defineRuntime({
     id: "pi",
     brand: runtimeBrands.pi,
-    refusedSessionOptions: piRefusedSessionOptions,
+    refusedSessionOptions: subprocess ? piRpcRefusedSessionOptions : piRefusedSessionOptions,
     mcpToolsListChanged: "full",
     ...createPiInventories(options),
     installation: piInstallation,
     listModels: piModelLister(options),
-    session: createPiSession(options),
+    session: subprocess ? onFirstCall(async () => { const rpc = await import("./rpc/session.js"); return rpc.createPiRpcSession(options); }) : createPiSession(options),
   });
 }
 
