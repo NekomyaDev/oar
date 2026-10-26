@@ -1,10 +1,10 @@
 /* oxlint-disable import/max-dependencies -- Launch validates native options and owns MCP and prompt-file handoffs. */
-import { claudeServiceTierArgs } from "./service-tier.js";
+import { claudeUserConfiguration } from "./user-configuration.js";
+import { claudeServiceTierSettings } from "./service-tier.js";
+import type { JsonRecord } from "../../shared/json.js";
 import { UnsupportedOptionError, type SessionOptions } from "../../contracts/index.js";
 import { refuseManagedLaunchArgs } from "./launch-args.js";
 import { resolvedAdditionalDirectories } from "../../shared/additional-directories.js";
-import { sessionEnvironment } from "../../shared/environment.js";
-import { claudeSessionEnv } from "./environment.js";
 import { spawnLineProcess, type LineProcess } from "../../shared/executable/index.js";
 import { givenMcpServers } from "../../shared/mcp-servers.js";
 import { checkSessionName } from "../../shared/session-options.js";
@@ -16,8 +16,8 @@ import { claudePromptFiles } from "./prompt-files.js";
  *
  * SessionOptions.mcpServers is `--mcp-config <path>` (claude 2.1.292, probed
  * against a scripted provider), handed over as mcp-config.ts describes. The
- * servers join the user's own, which stay loaded because oar never passes
- * `--strict-mcp-config`; claude reports them in system/init as `source:
+ * servers join the user's own by default. With userConfiguration: exclude,
+ * `--strict-mcp-config` loads only the host's servers. Claude reports them as `source:
  * "dynamic"`, and a dynamic server replaces a user-scope server of the same
  * name for that process (the user's other servers stay). The same flag goes
  * on a `--resume`, which remembers none.
@@ -26,8 +26,11 @@ import { claudePromptFiles } from "./prompt-files.js";
 /** The process a claude session drives. */
 export type ClaudeProcess = LineProcess;
 
-function spawnClaude(command: string, sessionId: string, options: SessionOptions, mcpConfig: string | null, nativeArgs: readonly string[]): LineProcess {
+function spawnClaude(command: string, sessionId: string, options: SessionOptions, mcpConfig: string | null, tierSettings: JsonRecord, nativeArgs: readonly string[]): LineProcess {
   const directories = resolvedAdditionalDirectories(options);
+  const configuration = claudeUserConfiguration(options);
+  // Claude replaces, rather than merges, repeated --settings arguments.
+  const settings = { ...tierSettings, ...configuration.settings };
   return spawnLineProcess(command, [
     "-p",
     "--input-format", "stream-json",
@@ -45,7 +48,9 @@ function spawnClaude(command: string, sessionId: string, options: SessionOptions
     ...(options.resume !== undefined || options.name === undefined ? [] : ["--name", options.name]),
     ...(options.model === undefined ? [] : ["--model", options.model]),
     ...(options.effort === undefined ? [] : ["--effort", options.effort]),
+    ...(Object.keys(settings).length === 0 ? [] : ["--settings", JSON.stringify(settings)]),
     ...nativeArgs,
+    ...configuration.args,
     ...(options.outputSchema === undefined ? [] : ["--json-schema", JSON.stringify(options.outputSchema)]),
     // The host's own flags, unchecked (SessionOptions.launchArgs), ahead of
     // the variadic flags below so none swallows them as values.
@@ -57,7 +62,7 @@ function spawnClaude(command: string, sessionId: string, options: SessionOptions
     cwd: options.cwd,
     // Without the parent session's markers, so print mode chooses sdk-cli and
     // claude is not a child of the host's own claude (environment.ts).
-    env: sessionEnvironment(claudeSessionEnv(options.env)),
+    env: configuration.env,
     // On Windows an npm .cmd wrapper can exit while native claude keeps
     // the provider request and stdio alive. Teardown must reach both.
     killTree: true,
@@ -82,7 +87,7 @@ export async function launchClaude(command: string, sessionId: string, options: 
   }
   refuseManagedLaunchArgs(options.launchArgs);
   checkSessionName(options);
-  const tierArgs = claudeServiceTierArgs(options.serviceTier);
+  const tierSettings = claudeServiceTierSettings(options.serviceTier);
   const servers = givenMcpServers(options.mcpServers);
   // Either way, what dead hosts left behind goes first (mcp-config.ts).
   const mcpConfig = servers === null ? null : await handOverMcpConfig(servers);
@@ -93,7 +98,7 @@ export async function launchClaude(command: string, sessionId: string, options: 
   let prompts: Awaited<ReturnType<typeof claudePromptFiles>> = null;
   try {
     prompts = await claudePromptFiles(options);
-    child = spawnClaude(command, sessionId, options, mcpConfig?.path ?? null, [...tierArgs, ...prompts?.args ?? []]);
+    child = spawnClaude(command, sessionId, options, mcpConfig?.path ?? null, tierSettings, prompts?.args ?? []);
     // Exit also covers a failed asynchronous spawn. Both cleanups are idempotent.
     child.onExit(() => {
       mcpConfig?.end();
