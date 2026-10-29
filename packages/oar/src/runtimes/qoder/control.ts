@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type { LineProcess } from "../../shared/executable/index.js";
 import { asRecord, type JsonRecord } from "../../shared/json.js";
+import { qoderTerminationReason } from "./protocol.js";
 
 // Qoder initializes built-in plugins on every open; measured native starts reach 25s.
 export const qoderInitializeTimeoutMs = 60_000;
@@ -18,7 +19,7 @@ export function qoderControl(child: LineProcess, remember: (value: unknown) => v
   let ended = false;
   const end = (): void => {
     ended = true;
-    for (const finish of pending.values()) { finish(new Error("Qoder exited before answering a control request")); }
+    for (const finish of pending.values()) { finish(new Error(qoderTerminationReason(child) ?? "Qoder exited before answering a control request")); }
     pending.clear();
   };
   return {
@@ -35,7 +36,7 @@ export function qoderControl(child: LineProcess, remember: (value: unknown) => v
       const id = `oar-qoder-${randomUUID()}`;
       const { promise, resolve } = Promise.withResolvers<JsonRecord | Error>();
       privateIds.add(id); pending.set(id, resolve);
-      const timer = setTimeout(() => { resolve(new Error(`Qoder did not answer ${String(request.subtype)} within ${String(requestTimeoutMs)} ms`)); }, requestTimeoutMs);
+      const timer = setTimeout(() => { resolve(new Error(`Qoder did not answer ${String(request.subtype ?? request.type)} within ${String(requestTimeoutMs)} ms`)); }, requestTimeoutMs);
       try {
         if (ended) { throw new Error("Qoder process has exited"); }
         child.write(`${JSON.stringify({ type: "control_request", request_id: id, request })}\n`);
@@ -44,7 +45,7 @@ export function qoderControl(child: LineProcess, remember: (value: unknown) => v
         const response = asRecord(answer.response);
         if (response?.subtype !== "success") {
           // An account/configuration error may itself contain the private object.
-          throw new Error(`Qoder refused ${String(request.subtype)}`);
+          throw new Error(`Qoder refused ${String(request.subtype ?? request.type)}`);
         }
         return answer;
       } finally { clearTimeout(timer); pending.delete(id); }
