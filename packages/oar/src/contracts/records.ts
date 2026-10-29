@@ -1,9 +1,11 @@
-import type { InputImage, InputOrigin } from "./input.js";
+import type { GoalSetOptions, GoalSnapshot } from "./goal.js";
+import type { InputImage, InputOrigin, UserMessage } from "./input.js";
 import type { ToolCallProgress, ToolOutputPart } from "./tool-output.js";
 import type { FailureClass } from "./failure.js";
 import type { TaskEventBody } from "./tasks.js";
 import type { TurnOutcome } from "./turn-outcome.js";
 
+export type { UserMessage } from "./input.js";
 export type { TurnOutcome } from "./turn-outcome.js";
 
 /**
@@ -125,22 +127,14 @@ export interface UsageReport {
   readonly total?: TokenTotals;
 }
 
-/** A native user-message observation, not proof of model consumption. */
-export interface UserMessage {
-  readonly kind: "user_message";
-  readonly input: string;
-  readonly inputId?: string;
-  readonly nativeMessageId?: string;
-  readonly turnId?: string;
-  readonly evidence: "acknowledged" | "turn_item" | "conversation";
-}
-
 /**
  * The runtime-said event kinds: what a Frame can carry. `text_delta` is at
  * the granularity the runtime emits (claude, pi and codex: streamed pieces); `Session.events({ coalesceText })`
  * merges consecutive pieces for consumers who want blocks.
  */
-export type RuntimeEventBody = UserMessage
+export type RuntimeEventBody =
+  | { readonly kind: "goal_changed"; readonly goal: GoalSnapshot | null }
+  | UserMessage
   /** Native evidence of true session lineage, carried by the frame that names the relationship. Foreign session ids alone never establish an edge. */
   | { readonly kind: "session_linked"; readonly parent: string; readonly child: string; readonly via: "tool_call" }
   /** The runtime reports an active turn. inputId names the input it started for; absent means unknown. After input_queued, only a matching inputId begins that input’s turn. */
@@ -202,7 +196,7 @@ export type RuntimeEventBody = UserMessage
   | { readonly kind: "app_request_cancelled"; readonly requestId: string };
 
 /** The toRuntime control actions a Session issues. */
-export type ControlAction = "prompt" | "steer" | "queue" | "withdraw" | "abort" | "dispose";
+export type ControlAction = "prompt" | "steer" | "queue" | "withdraw" | "abort" | "dispose" | "goal_set" | "goal_read" | "goal_clear";
 
 /**
  * Event kinds read off request and response records, so a consumer of
@@ -240,6 +234,9 @@ export type EventBody = RuntimeEventBody | ControlEventBody;
 export type Event = EventBody & RecordEnvelope;
 
 export type RequestBody =
+  | { readonly kind: "goal_set"; readonly options: GoalSetOptions }
+  | { readonly kind: "goal_read" }
+  | { readonly kind: "goal_clear" }
   | { readonly kind: "prompt"; readonly carries?: readonly string[]; readonly inputId?: string; readonly input: string; readonly images?: readonly InputImage[]; readonly origin?: InputOrigin }
   | { readonly kind: "steer"; readonly inputId?: string; readonly input: string; readonly images?: readonly InputImage[]; readonly origin?: InputOrigin }
   | { readonly kind: "queue"; readonly inputId?: string; readonly input: string; readonly images?: readonly InputImage[]; readonly origin?: InputOrigin }
