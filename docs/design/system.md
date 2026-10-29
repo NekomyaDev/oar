@@ -168,7 +168,14 @@ host that needs them chooses isolated placement on the runtime instance it
 opens sessions from. Sessions share a process (the pool) only when they come
 from the same runtime instance; the default runtime instances are module
 level, so every session opened from one of them in the host process joins
-the same pool. The runtime declares the placement in effect.
+the same pool. The runtime instance declares the host's request: automatic,
+shared or isolated. The actual placement belongs to each opened session,
+after the adapter has checked its installation's version and platform. An
+automatic request falls back to isolation when evidence is missing; an
+explicit shared request is refused then. In-process SDK execution is a
+separate fact and cannot silently satisfy either explicit process placement.
+The [record-stream contract](../spec/record-stream.md#placement-and-release)
+defines the request, observation and release records.
 
 The Session members stay the same in both placements. What `dispose`, the
 abort fallback and `resources()` guarantee differs, and is declared: in a
@@ -215,7 +222,8 @@ Sharing follows five rules:
    Where no per-session cleanup exists or it is unverified, the runtime does
    not share.
 4. **One fault, every session.** If the shared process exits, every session
-   in it ends, each with its own exit record. OAR does not restart or replace
+   still attached to it ends, each with its own exit record. A session whose
+   dispose already released its lease has unsubscribed and receives no later exit. OAR does not restart or replace
    a shared process while sessions run in it; the process ends when its last
    session is disposed.
 5. **Shared only with evidence.** A runtime version shares only after these

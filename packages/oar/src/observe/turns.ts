@@ -1,12 +1,13 @@
 import { initialStatus, reduceStatus } from "./agent-status.js";
-import { exitTurnOutcome } from "./turn-stop.js";
+import { exitTurnOutcome, releaseTurnOutcome } from "./turn-stop.js";
 import type { ControlOutcome, InputImage, RejectionCode, Session, RawEvent, TurnOutcome } from "../contracts/session.js";
 
 /**
  * Turn helpers for consumers. A turn is a SPAN on the stream, not a control
  * object: a prompt request is its fallback start; native input_queued and
  * turn_active with inputId can establish its actual start. It ends at the runtime's own
- * `turn_ended` event (or at the process exit oar observed). A native before-start input drop
+ * `turn_ended` event or at an observed process exit. Session release also ends OAR's wait,
+ * without proving native work stopped. A native before-start input drop
  * also resolves an input-scoped wait (aborted for interruption, failed for refusal), without synthesizing a turn end.
  *
  * Scope: the ROOT SESSION's ROOT AGENT. A derived child session's records
@@ -18,7 +19,8 @@ import type { ControlOutcome, InputImage, RejectionCode, Session, RawEvent, Turn
 
 /**
  * The root-agent turn end after `afterSeq`, if the stream already holds one:
- * the runtime's turn_ended event, or an observed process exit. When `sessionId`
+ * the runtime's turn_ended event, an observed process exit, or session release.
+ * Release ends the wait without proving native work stopped. When `sessionId`
  * is given, only that session's records count. inputId gates on a matching
  * native input_queued until its turn_active; without that evidence, the first
  * end wins. A matching input drop resolves as aborted for interruption or
@@ -48,6 +50,10 @@ function turnEndReader(afterSeq: number, sessionId?: string, inputId?: string, o
     }
     const previous = status;
     status = reduceStatus(previous, record, sessionId);
+    if (previous.kind === "idle" && previous.released === true) {
+      return record.seq > afterSeq && record.kind === "response" && record.body.kind === "exited"
+        ? exitTurnOutcome(undefined, record.body.reason) : null;
+    }
     if (record.kind === "frame") {
       for (const event of record.body.events) {
         if (inputId !== undefined && event.kind === "input_queued" && event.inputId === inputId) { waitingForInput = true; }
@@ -63,15 +69,18 @@ function turnEndReader(afterSeq: number, sessionId?: string, inputId?: string, o
         if (record.seq > afterSeq && !waitingForInput && event.kind === "turn_ended" && (!onlyWhenIdle || status.kind === "idle")) { return event.outcome; }
       }
     }
-    return record.seq > afterSeq && record.kind === "response" && record.body.kind === "exited"
-      ? exitTurnOutcome(previous.kind === "running" ? previous.stop ?? previous.pendingPrompt?.stop : previous.pendingPrompt?.stop, record.body.reason)
-      : null;
+    if (record.seq <= afterSeq || record.kind !== "response") { return null; }
+    const stop = previous.kind === "running" ? previous.stop ?? previous.pendingPrompt?.stop : previous.pendingPrompt?.stop;
+    if (record.body.kind === "released") { return releaseTurnOutcome(stop); }
+    return record.body.kind === "exited" ? exitTurnOutcome(stop, record.body.reason) : null;
   };
 }
 
 /**
  * Resolve with the first turn end of the session's root agent recorded after
  * `afterSeq`, from the retained log if it already happened, otherwise live.
+ * An observed process exit or session release also resolves it; release does
+ * not prove native work stopped, and late native frames cannot revise its outcome.
  * A derived child session's turn end never satisfies it. With inputId, native
  * queue/start evidence excludes intervening turns. Without it, behavior is unchanged.
  */
@@ -125,9 +134,9 @@ export interface PromptRunOptions {
 export type PromptRun =
   /** The prompt did not begin a turn (busy, dead runtime); nothing was waited for. */
   | { readonly kind: "rejected"; readonly result: ControlOutcome; readonly code: RejectionCode; readonly reason: string }
-  /** The runtime ended the turn or dropped the input. `text` is the root agent's text of this turn, concatenated. */
+  /** The runtime ended the turn, dropped the input or exited, or OAR released the session. `text` is the root agent's text of this turn, concatenated. */
   | { readonly kind: "ended"; readonly result: ControlOutcome; readonly outcome: TurnOutcome; readonly text: string }
-  /** The caller's timeout or signal fired first and the abort was taken over; `outcome` is the native turn end or an observed exit after the stop. */
+  /** The caller's timeout or signal fired first and the abort was taken over; `outcome` is the native turn end, an observed exit or session release after the stop. */
   | { readonly kind: "interrupted"; readonly by: "timeout" | "signal"; readonly result: ControlOutcome; readonly outcome: TurnOutcome; readonly text: string };
 
 /**
@@ -138,7 +147,7 @@ export type PromptRun =
  * that abort was taken over. An abort the runtime refuses because the turn
  * had just ended is the ordinary late-abort race, and the run is `ended`.
  * After an accepted abort the turn's end is awaited with no further limit:
- * a native turn end keeps its outcome; exit after that accepted abort is
+ * a native turn end keeps its outcome; exit or release after that accepted abort is
  * `aborted`. A native before-start input drop resolves as `aborted` for interruption or `failed` for refusal.
  * Without one of these facts the helper continues waiting.
  */

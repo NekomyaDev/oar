@@ -24,7 +24,7 @@ interface PendingPrompt {
 }
 
 export type AgentStatus = (
-  | { readonly kind: "idle"; readonly lastTurnOutcome?: TurnOutcome }
+  | { readonly kind: "idle"; readonly lastTurnOutcome?: TurnOutcome; readonly released?: true }
   | {
       readonly kind: "running";
       /** seq of the record that opened this running span: the prompt request, or the first event of an adopted turn. */
