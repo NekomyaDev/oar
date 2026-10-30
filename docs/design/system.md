@@ -235,9 +235,11 @@ Sharing follows five rules:
    close and resume at the same time); and lower memory without higher CPU
    than isolated, measured on that version and platform. Until then it runs one process per
    session, and an explicit request for shared placement is refused with a
-   typed reason. No runtime meets this gate yet: the 2026-10-28 report covers
-   Linux only and none of the failure cases. Claude, Qwen and Pi RPC run one
-   session per native process and are always isolated. Qoder 1.1.80 and earlier
-   are also isolated. From 1.1.81, Qoder's native SDK daemon can run multiple
-   sessions ([probe](../../experiments/qoder-native/daemon-2026-10-29.md));
-   sharing still requires separate evidence for every part of this rule.
+   typed reason. The exact versions and platforms that meet this gate are
+   recorded in the [evidence index](../../experiments/sharing/README.md)
+   (currently the 2026-10-30 report). Until adapters enable sharing, all native
+   sessions still run in isolation. Claude, Qwen and Pi RPC
+   run one session per native process and are always isolated. Qoder 1.1.80
+   and earlier are also isolated. From 1.1.81, Qoder's native SDK daemon can
+   run multiple sessions ([probe](../../experiments/qoder-native/daemon-2026-10-29.md));
+   admission still requires evidence for every part of this rule.
